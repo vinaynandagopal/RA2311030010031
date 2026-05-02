@@ -405,3 +405,77 @@ Use **Redis caching** combined with **pagination**:
 - Redis handles the repeated reads efficiently
 - Pagination ensures even cache misses don't overload the DB
 - WebSockets (from Stage 1) push new notifications instantly so the user always sees fresh data without polling
+
+## Stage 5
+
+### What is wrong with this implementation?
+
+1. **Sequential processing** — It processes one student at a time in a loop. For 50,000 students this is extremely slow. If each operation takes even 10ms, the entire loop takes 500 seconds
+2. **No error handling** — If `send_email` fails for one student, the entire loop crashes and remaining students never get notified
+3. **Tight coupling** — All three operations (email, DB save, push) happen together in one block. If any one fails, the others may not complete
+4. **No retry mechanism** — If the Email API is temporarily down, there is no way to retry failed emails
+5. **Blocking calls** — Each operation waits for the previous one to finish before starting
+
+---
+
+### The send_email failed for 200 students midway — what now?
+
+With the current implementation, those 200 students simply never get their email and there is no record of the failure. The system has no way to know which students were affected or retry them.
+
+**The fix:** Use a **message queue** (like Redis Queue or RabbitMQ). Every email job is added to a queue. If it fails, it goes back into the queue and is retried automatically. This way no student is ever silently skipped.
+
+---
+
+### Should saving to DB and sending email happen together?
+
+**No — they should be separate (decoupled).**
+
+- Saving to DB is critical — it must always happen so the notification appears in the app
+- Sending email is a secondary action — it can be retried if it fails
+- If they happen together in one transaction, a failed email would also rollback the DB save, meaning the student never sees the notification in the app either
+- The DB save should happen immediately and synchronously. The email should be handled asynchronously via a queue
+
+---
+
+### Redesigned Pseudocode
+
+```
+function notify_all(student_ids: array, message: string):
+
+    # Step 1: Save all notifications to DB in one bulk insert (fast)
+    bulk_save_to_db(student_ids, message)
+
+    # Step 2: Push real-time notification via WebSocket (non-blocking)
+    for student_id in student_ids:
+        push_to_app(student_id, message)  # async, non-blocking
+
+    # Step 3: Add email jobs to a queue (non-blocking)
+    for student_id in student_ids:
+        email_queue.enqueue({
+            student_id: student_id,
+            message: message,
+            retry_count: 0,
+            max_retries: 3
+        })
+
+
+# Email queue worker runs separately in background
+function email_worker():
+    while True:
+        job = email_queue.dequeue()
+        success = send_email(job.student_id, job.message)
+
+        if not success:
+            if job.retry_count < job.max_retries:
+                job.retry_count += 1
+                email_queue.enqueue(job)  # put back in queue to retry
+            else:
+                log_failed_email(job.student_id)  # record permanent failure
+```
+
+**Why this is better:**
+- `bulk_save_to_db` inserts all 50,000 rows in one query instead of 50,000 separate queries
+- Email sending is fully async — failures don't affect DB saves or app notifications
+- Automatic retry up to 3 times before marking as permanently failed
+- WebSocket push is non-blocking so all students get real-time notification instantly
+- The system can handle failures gracefully without losing any data
