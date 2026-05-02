@@ -329,3 +329,79 @@ JOIN notifications n ON s.id = n.student_id
 WHERE n.type = 'Placement'
 AND n.created_at >= NOW() - INTERVAL '7 days';
 ```
+
+## Stage 4
+
+### The Problem
+
+Every time a student loads a page, a fresh DB query runs to fetch their notifications. With 50,000 students constantly loading pages, the database gets overwhelmed with identical repeated queries, causing slow response times and poor user experience.
+
+---
+
+### Solution — Caching with Redis
+
+The best solution is to use **Redis** as a caching layer between the frontend and the database.
+
+**How it works:**
+1. When a student requests their notifications, first check Redis
+2. If the data exists in Redis (cache hit) — return it immediately, no DB query needed
+3. If the data does not exist in Redis (cache miss) — fetch from DB, store in Redis, then return it
+4. Next time the same student requests notifications, Redis serves it instantly
+
+**Implementation:**
+```
+Request → Check Redis
+    ├── Cache HIT  → Return cached notifications (fast, no DB)
+    └── Cache MISS → Query DB → Store in Redis → Return notifications
+```
+
+**Redis key structure:**
+```
+notifications:student:{student_id}        → list of notifications
+notifications:unread_count:{student_id}   → unread count
+```
+
+**Cache invalidation — when to clear the cache:**
+- When a new notification is sent to a student → clear their cache
+- When a student marks a notification as read → clear their cache
+- Set a TTL (Time To Live) of 5 minutes so cache auto-expires
+
+---
+
+### Other Strategies and Tradeoffs
+
+#### Strategy 1 — Redis Caching (Recommended)
+| Pros | Cons |
+|---|---|
+| Extremely fast reads | Extra infrastructure to manage |
+| Reduces DB load by 90%+ | Cache can become stale if not invalidated properly |
+| Scales well | Slightly more complex code |
+
+#### Strategy 2 — Pagination
+| Pros | Cons |
+|---|---|
+| Simple to implement | DB still gets hit on every page load |
+| Reduces data transferred | Doesn't solve the core DB overload problem |
+| Better UX than loading all at once | |
+
+#### Strategy 3 — Client-Side Caching
+| Pros | Cons |
+|---|---|
+| No server load at all | Data can go stale quickly |
+| Instant for the user | Not suitable for real-time notifications |
+| Simple to implement | Different devices won't be in sync |
+
+#### Strategy 4 — CDN Caching
+| Pros | Cons |
+|---|---|
+| Great for static content | Notifications are user-specific, CDN is not suitable |
+| Very fast globally | Cannot cache personalized data per student |
+
+---
+
+### Recommended Approach
+
+Use **Redis caching** combined with **pagination**:
+- Redis handles the repeated reads efficiently
+- Pagination ensures even cache misses don't overload the DB
+- WebSockets (from Stage 1) push new notifications instantly so the user always sees fresh data without polling
