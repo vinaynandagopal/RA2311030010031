@@ -479,3 +479,24 @@ function email_worker():
 - Automatic retry up to 3 times before marking as permanently failed
 - WebSocket push is non-blocking so all students get real-time notification instantly
 - The system can handle failures gracefully without losing any data
+
+## Stage 6
+
+### Priority Inbox Design
+
+The Priority Inbox always shows the top N most important notifications first.
+
+**Priority Rules:**
+- Placement is highest priority (weight = 1)
+- Result is second priority (weight = 2)
+- Event is lowest priority (weight = 3)
+- Within same type, newer notifications come first
+
+**Data Structure — Min-Heap:**
+- A heap is used so finding top N is efficient
+- Each entry is (priority_number, negated_timestamp, notification)
+- Negating timestamp makes newer notifications rank higher within same type
+- As new notifications arrive, push into heap and pop lowest priority out
+- This keeps memory usage constant at N regardless of total notifications
+
+**Code:** See `notification_app_be/priority_inbox.py`
