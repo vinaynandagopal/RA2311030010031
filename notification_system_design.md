@@ -1,14 +1,16 @@
-Notification System Design
+# Notification System Design
 
-Stage 1
+## Stage 1
 
-Overview
+### Overview
 This document defines the REST API contract for the Campus Notification Platform.
 Users receive real-time updates for Placements, Events, and Results.
 
-API Endpoints
+---
 
-1. Get All Notifications for a User
+### API Endpoints
+
+#### 1. Get All Notifications for a User
 **GET** `/api/notifications`
 
 **Headers:**
@@ -32,7 +34,9 @@ Content-Type: application/json
 }
 ```
 
-2. Get a Single Notification
+---
+
+#### 2. Get a Single Notification
 **GET** `/api/notifications/:id`
 
 **Headers:**
@@ -53,7 +57,7 @@ Authorization: Bearer <token>
 
 ---
 
-3. Mark a Notification as Read
+#### 3. Mark a Notification as Read
 **PATCH** `/api/notifications/:id/read`
 
 **Headers:**
@@ -71,7 +75,7 @@ Authorization: Bearer <token>
 
 ---
 
-4. Mark All Notifications as Read
+#### 4. Mark All Notifications as Read
 **PATCH** `/api/notifications/read-all`
 
 **Headers:**
@@ -88,7 +92,7 @@ Authorization: Bearer <token>
 
 ---
 
-5. Get Unread Notification Count
+#### 5. Get Unread Notification Count
 **GET** `/api/notifications/unread-count`
 
 **Headers:**
@@ -105,9 +109,9 @@ Authorization: Bearer <token>
 
 ---
 
-JSON Schemas
+### JSON Schemas
 
-Notification Object
+#### Notification Object
 ```json
 {
   "id": "string (UUID)",
@@ -145,6 +149,7 @@ Payload: {
   "createdAt": "2026-04-22T17:51:18"
 }
 ```
+
 ## Stage 2
 
 ### Database Choice — PostgreSQL (Relational/SQL)
@@ -251,3 +256,76 @@ CREATE INDEX idx_notifications_unread ON notifications(student_id, is_read) WHER
 3. **Archiving** — Move notifications older than 6 months to an archive table to keep the main table small and fast
 
 4. **Async writes** — Use a message queue (like RabbitMQ or Redis Queue) to handle bulk inserts when notifying all 50,000 students at once instead of writing all at once
+
+## Stage 3
+
+### Is the query accurate?
+
+Yes, the query is logically correct as it fetches all unread notifications for a specific student ordered by newest first but at scale, the query has performance problems.
+
+---
+
+### Why is it slow?
+
+1. **No index on studentID or isRead** — The database has to scan every single row in the notifications table to find matching rows. With 50,000 students and millions of notifications this is extremely slow
+2. **SELECT \*** — Fetching all columns including ones the frontend may not need wastes memory and bandwidth
+3. **No LIMIT** — If a student has 10,000 unread notifications, all of them are returned at once which overwhelms both the DB and the frontend
+
+---
+
+### What would you change?
+
+**Improved query:**
+```sql
+SELECT id, type, message, created_at
+FROM notifications
+WHERE student_id = 1042 AND is_read = false
+ORDER BY created_at DESC
+LIMIT 20 OFFSET 0;
+```
+
+**Changes made:**
+- Replace `SELECT *` with only needed columns
+- Add `LIMIT` and `OFFSET` for pagination — only fetch 20 at a time
+- Add indexes (see below) so the WHERE clause is fast
+
+**Add these indexes:**
+```sql
+CREATE INDEX idx_notifications_student_id ON notifications(student_id);
+CREATE INDEX idx_notifications_unread ON notifications(student_id, is_read) WHERE is_read = FALSE;
+CREATE INDEX idx_notifications_created_at ON notifications(created_at DESC);
+```
+
+---
+
+### Is adding indexes on every column a good idea?
+
+**No, this is bad advice.** Here is why:
+
+- Every index takes up extra storage space on disk
+- Every time a new notification is inserted or updated, ALL indexes on that table must also be updated — this makes writes significantly slower
+- Most columns are never used in WHERE clauses so indexing them gives zero benefit but adds cost
+- The right approach is to only index columns that are frequently used in WHERE, ORDER BY, or JOIN conditions
+
+**Good columns to index:** `student_id`, `is_read`, `created_at`, `type`
+**Bad columns to index:** `message`, `id` (already primary key)
+
+---
+
+### Query — Students who got a Placement notification in the last 7 days
+
+```sql
+SELECT DISTINCT student_id
+FROM notifications
+WHERE type = 'Placement'
+AND created_at >= NOW() - INTERVAL '7 days';
+```
+
+If you want student details too:
+```sql
+SELECT DISTINCT s.id, s.name, s.email
+FROM students s
+JOIN notifications n ON s.id = n.student_id
+WHERE n.type = 'Placement'
+AND n.created_at >= NOW() - INTERVAL '7 days';
+```
