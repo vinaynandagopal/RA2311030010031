@@ -145,3 +145,109 @@ Payload: {
   "createdAt": "2026-04-22T17:51:18"
 }
 ```
+## Stage 2
+
+### Database Choice — PostgreSQL (Relational/SQL)
+
+**Why PostgreSQL?**
+- Notifications have a clear, structured format (id, type, message, isRead, createdAt) — relational DB fits perfectly
+- We need to query by studentID, filter by isRead, sort by createdAt — SQL handles this naturally
+- PostgreSQL supports indexing very well which helps with performance as data grows
+- ACID compliance ensures no notification is lost or duplicated
+
+---
+
+### Database Schema
+
+#### Students Table
+```sql
+CREATE TABLE students (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+#### Notifications Table
+```sql
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    student_id UUID NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+    type notification_type NOT NULL,
+    message TEXT NOT NULL,
+    is_read BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Enum for notification type
+CREATE TYPE notification_type AS ENUM ('Placement', 'Result', 'Event');
+```
+
+---
+
+### Queries Based on Stage 1 APIs
+
+#### 1. Get all notifications for a user
+```sql
+SELECT id, type, message, is_read, created_at
+FROM notifications
+WHERE student_id = $1
+ORDER BY created_at DESC;
+```
+
+#### 2. Get a single notification
+```sql
+SELECT id, type, message, is_read, created_at
+FROM notifications
+WHERE id = $1 AND student_id = $2;
+```
+
+#### 3. Mark a notification as read
+```sql
+UPDATE notifications
+SET is_read = TRUE
+WHERE id = $1 AND student_id = $2;
+```
+
+#### 4. Mark all notifications as read
+```sql
+UPDATE notifications
+SET is_read = TRUE
+WHERE student_id = $1;
+```
+
+#### 5. Get unread notification count
+```sql
+SELECT COUNT(*) as unread_count
+FROM notifications
+WHERE student_id = $1 AND is_read = FALSE;
+```
+
+---
+
+### Problems as Data Grows
+
+As the platform grows to 50,000 students with millions of notifications, these problems will arise:
+
+1. **Slow queries** — Scanning the entire notifications table for one student becomes very slow without indexes
+2. **High DB load** — Every page load triggers a query, putting constant pressure on the database
+3. **Storage bloat** — Old notifications pile up and slow down the entire table
+4. **Write bottlenecks** — When a placement alert goes to 50,000 students at once, 50,000 rows need to be inserted simultaneously
+
+---
+
+### Solutions
+
+1. **Add indexes** on `student_id` and `created_at` so queries are fast even with millions of rows
+```sql
+CREATE INDEX idx_notifications_student_id ON notifications(student_id);
+CREATE INDEX idx_notifications_created_at ON notifications(created_at DESC);
+CREATE INDEX idx_notifications_unread ON notifications(student_id, is_read) WHERE is_read = FALSE;
+```
+
+2. **Caching** — Use Redis to cache each student's notifications so the DB is not hit on every page load
+
+3. **Archiving** — Move notifications older than 6 months to an archive table to keep the main table small and fast
+
+4. **Async writes** — Use a message queue (like RabbitMQ or Redis Queue) to handle bulk inserts when notifying all 50,000 students at once instead of writing all at once
